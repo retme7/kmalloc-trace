@@ -1,0 +1,128 @@
+diff --git a/mm/slub.c b/mm/slub.c
+index 7341005..82e100c 100644
+--- a/mm/slub.c
++++ b/mm/slub.c
+@@ -2729,10 +2729,114 @@ static __always_inline void *slab_alloc_node(struct kmem_cache *s,
+
+        return object;
+ }
++DEFINE_SPINLOCK(report_lock);
++DECLARE_BITMAP(reporters_bitmap,0xffffff8008f34708-0xffffff8008080000);
++bool reported_already(unsigned long caller)
++{
++       unsigned long flags,offset;
++       bool ret;
++       if(caller < (unsigned long)_text || caller > (unsigned long)(_text + 0xEB4708)){
++               printk("OOB caller %llx \n",_text);
++               return false;
++       }
++
++       offset = caller - (unsigned long)_text;
++       spin_lock_irqsave(&report_lock, flags);
++       if(test_bit(offset,reporters_bitmap)){
++               ret = true;
++       }else{
++               set_bit(offset,reporters_bitmap);
++               ret = false;
++       }
++       spin_unlock_irqrestore(&report_lock, flags);
++       return ret;
++}
++#include <asm/atomic.h>
++#include <asm/barrier.h>
++#include <asm/bug.h>
++#include <asm/debug-monitors.h>
++#include <asm/esr.h>
++#include <asm/insn.h>
++#include <asm/traps.h>
++#include <asm/stack_pointer.h>
++#include <asm/stacktrace.h>
++#include <asm/exception.h>
++#include <asm/system_misc.h>
++#include <asm/sysreg.h>
++#include <trace/events/exception.h>
++unsigned long get_malloc_caller(int level){
++
++       struct stackframe frame;
++       unsigned long irq_stack_ptr;
++       int skip;
++       struct task_struct *tsk = NULL;
++       struct pt_regs *regs = NULL;
++
++       if (!tsk)
++               tsk = current;
++
++       if (!try_get_task_stack(tsk))
++               return;
++
++       /*
++        * Switching between stacks is valid when tracing current and in
++        * non-preemptible context.
++        */
++       if (tsk == current && !preemptible())
++               irq_stack_ptr = IRQ_STACK_PTR(smp_processor_id());
++       else
++               irq_stack_ptr = 0;
++
++       if (tsk == current) {
++               frame.fp = (unsigned long)__builtin_frame_address(0);
++               frame.sp = current_stack_pointer;
++               frame.pc = (unsigned long)NULL;
++       } else {
++               /*
++                * task blocked in __switch_to
++                */
++               frame.fp = thread_saved_fp(tsk);
++               frame.sp = thread_saved_sp(tsk);
++               frame.pc = thread_saved_pc(tsk);
++       }
++
++               frame.pc = (unsigned long)NULL;
++       } else {
++               /*
++                * task blocked in __switch_to
++                */
++               frame.fp = thread_saved_fp(tsk);
++               frame.sp = thread_saved_sp(tsk);
++               frame.pc = thread_saved_pc(tsk);
++       }
++
++       skip = !!regs;
++       int i;
++       for(i=0;;i++) {
++               unsigned long where = frame.pc;
++               unsigned long stack;
++               int ret;
++
++               /* skip until specified stack frame */
++               if (!skip) {
++                       if(i==level)
++                               return where;
++                       //dump_backtrace_entry(where);
++               } else if (frame.fp == regs->regs[29]) {
++                       skip = 0;
++                       if(i==level)
++                               return where;
++               }
++               ret = unwind_frame(tsk, &frame);
++               if (ret < 0)
++                       break;
++               stack = frame.sp;
++               if (in_exception_text(where)) {
++                       if (stack < irq_stack_ptr &&
++                           (stack + sizeof(struct pt_regs)) > irq_stack_ptr)
++                               stack = IRQ_STACK_TO_TASK_STACK(irq_stack_ptr);
++               }
++       }
++
++       put_task_stack(tsk);
++}
+
+ static __always_inline void *slab_alloc(struct kmem_cache *s,
+                gfp_t gfpflags, unsigned long addr)
+ {
++       if(s == kmalloc_caches[11] && !reported_already(get_malloc_caller(2))){
++               dump_stack();
++       }
+        return slab_alloc_node(s, gfpflags, NUMA_NO_NODE, addr);
+ }
